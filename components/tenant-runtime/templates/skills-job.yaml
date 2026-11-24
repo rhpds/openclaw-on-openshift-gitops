@@ -121,7 +121,7 @@ subjects:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: tenant-skills-{{ printf "%v|%v|%v" .Values.tenant.namespace .Values.skills.revision (join "," .Values.skills.names) | sha256sum | trunc 8 }}
+  name: tenant-skills-{{ printf "%v|%v|%v|%v" .Chart.Version .Values.tenant.namespace .Values.skills.revision (join "," .Values.skills.names) | sha256sum | trunc 8 }}
   namespace: {{ .Values.tenant.namespace }}
   annotations:
     argocd.argoproj.io/hook: PostSync
@@ -198,6 +198,14 @@ spec:
           env:
             - name: NS
               value: {{ .Values.tenant.namespace | quote }}
+            # ON THIS CONTAINER TOO, not only on the fetch init
+            # container. The gateway-wait loop runs here under
+            # `set -u`, so without it every tenant aborts at
+            # `seq 1 "$WAIT_POLLS"` with "unbound variable" and the
+            # Job reports a timing failure -- "no gateway pod after
+            # waiting" -- on a tenant whose Claw is already Ready.
+            - name: WAIT_POLLS
+              value: {{ .Values.paths.gatewayWaitPolls | quote }}
             - name: HOME_DIR
               value: {{ .Values.paths.home | quote }}
             - name: SKILL_LIST

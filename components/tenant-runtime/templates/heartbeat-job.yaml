@@ -109,7 +109,7 @@ subjects:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: tenant-heartbeat-{{ printf "%v|%v" .Values.tenant.namespace .Values.heartbeat.muzzle | sha256sum | trunc 8 }}
+  name: tenant-heartbeat-{{ printf "%v|%v|%v" .Chart.Version .Values.tenant.namespace .Values.heartbeat.muzzle | sha256sum | trunc 8 }}
   namespace: {{ .Values.tenant.namespace }}
   annotations:
     argocd.argoproj.io/hook: PostSync
