@@ -1,0 +1,45 @@
+mcpCatalog:
+  dashboardNamespace: "redhat-ods-applications"
+  # Which seat's MCP servers the catalog points at. The catalog is
+  # cluster-scoped, so 100 seats x 3 servers would be 300 near-identical
+  # entries; one seat acts as the exemplar.
+  exemplarNamespace: "agentic-user1"
+
+  # Reveal the catalog in the dashboard nav. The ConfigMap above is only
+  # half the job -- these flags default to false, and with them off the
+  # page is simply absent from the menu. Needs modelregistry Managed too
+  # (components/rhoai). See templates/dashboard-flags-job.yaml.
+  setDashboardFlags: true
+  dashboardFlags:
+    # mcpCatalog/mcpRegistry: AI hub -> MCP servers.
+    - mcpCatalog
+    - mcpRegistry
+    # genAiStudio: the Gen AI studio nav itself -- Playground and AI
+    # assets. Absent from OdhDashboardConfig means false, so without it
+    # those pages do not exist in the menu no matter how healthy ogx,
+    # trustyai and the gen-ai-ui pod are. Found on sv68v 2026-11-19
+    # with everything Running and the nav empty.
+    - genAiStudio
+    # observabilityDashboard: the "Observe & monitor" section. The flag
+    # is necessary but NOT sufficient -- its nav entry also carries a
+    # customCondition on dsciStatus, so the DSCI must actually be
+    # serving a monitoring stack. See deploy-rhoai-observability.sh.
+    - observabilityDashboard
+    # externalModels: the External models page. Without it the MaaS
+    # model is Ready and INVISIBLE, which reads as "the model never
+    # deployed". From the scripts-side handoff, measured on rosa-wv5l4.
+    - externalModels
+    # modelAsService: the Models-as-a-Service pages.
+    - modelAsService
+    # promptManagement: the prompt registry.
+    #
+    # The scripts-side handoff says DO NOT enable this, because the
+    # flag only reveals the page and nothing there creates the MLflow
+    # CR the page needs -- Save prompt then fails with Service
+    # Unavailable. That is correct for the scripts path. It does not
+    # apply here: components/observability models the CR (named
+    # literally `mlflow`, backendStoreUriFrom, ?sslmode=disable, its
+    # own PostgreSQL). Verified on sv68v: Available=True, Migration
+    # completed. If you ever set observability.mlflowRhoai: false,
+    # drop this flag with it.
+    - promptManagement

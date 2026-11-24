@@ -1,0 +1,14 @@
+apiVersion: v2
+name: openclaw-on-openshift-cluster
+description: >-
+  Cluster half of the OpenClaw-on-OpenShift demo: the shared platform
+  every tenant draws on -- RHOAI, ODF/MCG, MaaS-over-MaaS, the claw
+  operator, observability, MLflow tracing, the MCP catalog and the
+  session broker. Tenants are deployed separately, once per order, by
+  the tenant chart; this chart knows nothing about them.
+type: application
+version: 0.1.0
+appVersion: "2026.6.35"
+maintainers:
+  - name: Natale Vinto
+    email: nvinto@redhat.com

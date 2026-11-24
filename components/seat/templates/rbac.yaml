@@ -1,0 +1,38 @@
+---
+# What the tenant may do to their own seat. Namespaced by the
+# RoleBinding below, so they can drive their Claw CR and nothing else.
+#
+# The ClusterRole is shared by every tenant and is therefore declared
+# by all of them. That is deliberate rather than sloppy: a
+# cluster-scoped object with identical content from N Applications
+# converges, whereas moving it to the cluster chart would make every
+# tenant depend on a cluster-chart version that may predate it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: claw-user
+  labels:
+    demo.redhat.com/application: "openclaw-on-openshift"
+  annotations:
+    # Shared, so no tenant should ever delete it on its way out.
+    argocd.argoproj.io/sync-options: Prune=false
+rules:
+  - apiGroups: ["claw.sandbox.redhat.com"]
+    resources: ["claws", "clawdevicepairingrequests"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: claw-user
+  namespace: {{ .Values.seat.namespace }}
+  labels:
+    demo.redhat.com/application: "openclaw-on-openshift"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: claw-user
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: {{ .Values.seat.username }}

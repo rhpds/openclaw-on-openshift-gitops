@@ -1,0 +1,217 @@
+{{/*
+App-of-apps for ONE tenant.
+
+WHY THREE APPLICATIONS AND NOT ONE. The same reason as in the N-seat
+chart: these three things fail for unrelated reasons and at unrelated
+times. The seat is plain resources; the key is minted against a
+gateway that has to be Ready first; the in-pod setup needs a gateway
+pod that is already running. Collapsing them hides which of the three
+is broken behind a single red Application, and makes a retry of the
+cheap one re-run the expensive one.
+
+WAVES, not hope. seat (0) creates the Claw; seat-keys (1) mints into a
+namespace that exists; seat-runtime (2) talks to a pod that is up.
+Argo waits for health between waves, so this ordering is real.
+
+Each is named after the tenant, because a cluster carries one of these
+per order and `openclaw-seat` would collide on the second tenant.
+*/}}
+{{- $ns := include "tenant.namespace" . }}
+{{- $name := .Values.tenant.name | default $ns }}
+
+{{- if .Values.components.seat.enabled }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ printf "claws-%s-seat" $name | trunc 53 | trimSuffix "-" }}
+  namespace: {{ .Values.argocd.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ include "tenant.repoURL" . }}
+    targetRevision: {{ include "tenant.revision" . }}
+    path: {{ include "tenant.componentPath" . }}components/seat
+    helm:
+      valuesObject:
+        seat:
+          namespace: {{ $ns | quote }}
+          username: {{ include "tenant.username" . | quote }}
+          userCode: {{ include "tenant.userCode" . | quote }}
+          # One tenant per cluster order, so there is no index. The
+          # seat chart only uses it for display.
+          index: {{ $name | quote }}
+          labelAsAiProject: {{ .Values.seat.labelAsAiProject }}
+          mlflowWorkspace: {{ .Values.seat.mlflowWorkspace }}
+          # Off by default: ocp4_workload_tenant_namespace already made
+          # both, and two owners for one object is how a quota ends up
+          # flapping between two values.
+          createNamespace: {{ .Values.seat.createNamespace }}
+          createQuota: {{ .Values.seat.createQuota }}
+        cluster:
+          appsDomain: {{ .Values.cluster.appsDomain | quote }}
+        deployer:
+          guid: {{ .Values.tenant.name | quote }}
+        audience:
+          enabled: {{ .Values.audience.enabled }}
+          code: {{ include "tenant.userCode" . | quote }}
+        images:
+          openclaw: {{ .Values.images.openclaw | quote }}
+          pullSecret: {{ .Values.images.pullSecret | quote }}
+          pullSecretName: {{ .Values.images.pullSecretName | quote }}
+        maas:
+          model: {{ .Values.maas.model | quote }}
+          apiBase: {{ include "tenant.apiBase" . | quote }}
+          contextWindow: {{ .Values.maas.contextWindow }}
+          contextTokens: {{ .Values.maas.contextTokens }}
+          maxTokens: {{ .Values.maas.maxTokens }}
+          # The secret, not the value. On the minting path the value
+          # cannot exist yet; on the injected path seat-keys writes it.
+          keySecretName: {{ .Values.maas.keySecretName | quote }}
+        tracing:
+          enabled: {{ .Values.tracing.enabled }}
+          endpoint: {{ include "tenant.traceEndpoint" . | quote }}
+          headers: ""
+          sampleRate: {{ .Values.tracing.sampleRate }}
+          captureContent: {{ .Values.tracing.captureContent }}
+          captureSystemPrompt: {{ .Values.tracing.captureSystemPrompt }}
+          # The collector lives in the cluster chart; the tenant only
+          # needs egress to it.
+          collectorNamespace: {{ .Values.tracing.namespace | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $ns }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace={{ .Values.seat.createNamespace }}
+    retry:
+      # Short and few on purpose: a failed sync pins itself to the
+      # revision it started on, so a long retry keeps a stale commit
+      # alive. Failing fast lets the next poll start at HEAD.
+      limit: 3
+      backoff:
+        duration: 20s
+        maxDuration: 2m
+{{- end }}
+
+{{- if and .Values.components.seatKeys.enabled .Values.keys.mint }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ printf "claws-%s-key" $name | trunc 53 | trimSuffix "-" }}
+  namespace: {{ .Values.argocd.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    # After the seat: the key is written into the seat's namespace.
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ include "tenant.repoURL" . }}
+    targetRevision: {{ include "tenant.revision" . }}
+    path: {{ include "tenant.componentPath" . }}components/tenant-key
+    helm:
+      valuesObject:
+        tenant:
+          namespace: {{ $ns | quote }}
+          username: {{ include "tenant.username" . | quote }}
+          password: {{ .Values.tenant.user.password | quote }}
+        keys:
+          asTenant: {{ .Values.keys.asTenant }}
+          waitMinutes: {{ .Values.keys.waitMinutes }}
+        maas:
+          gatewayHost: {{ include "tenant.maasGatewayHost" . | quote }}
+          model: {{ .Values.maas.model | quote }}
+          keySecretName: {{ .Values.maas.keySecretName | quote }}
+          keyExpirationDays: {{ .Values.maas.keyExpirationDays }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $ns }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 3
+      backoff:
+        duration: 20s
+        maxDuration: 2m
+{{- end }}
+
+{{- if and .Values.components.seatKeys.enabled (not .Values.keys.mint) .Values.claws.models.apiToken }}
+---
+{{/*
+The injected-key path.
+
+No hook: the key already exists, so this is just a Secret. It is
+create-if-absent in spirit -- selfHeal will keep it at the injected
+value, which is correct here because AgnosticV owns that value and
+nothing in the cluster rotates it.
+*/}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.maas.keySecretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+type: Opaque
+stringData:
+  api-key: {{ .Values.claws.models.apiToken | quote }}
+{{- end }}
+
+{{- if .Values.components.seatRuntime.enabled }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ printf "claws-%s-runtime" $name | trunc 53 | trimSuffix "-" }}
+  namespace: {{ .Values.argocd.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    # Last: this one execs into a gateway pod, which has to be running.
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ include "tenant.repoURL" . }}
+    targetRevision: {{ include "tenant.revision" . }}
+    path: {{ include "tenant.componentPath" . }}components/tenant-runtime
+    helm:
+      valuesObject:
+        tenant:
+          namespace: {{ $ns | quote }}
+        runtime:
+          repoUrl: {{ include "tenant.repoURL" . }}
+          revision: {{ include "tenant.revision" . }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $ns }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 3
+      backoff:
+        duration: 20s
+        maxDuration: 2m
+{{- end }}

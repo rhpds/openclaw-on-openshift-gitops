@@ -1,0 +1,35 @@
+{{- if .Values.seat.labelAsAiProject }}
+---
+# The tenant namespace, declared so it can carry labels.
+#
+# DECLARED EVEN THOUGH SOMETHING ELSE CREATED IT. On an ordered cluster
+# ocp4_workload_tenant_namespace makes this namespace first; Argo then
+# adopts it and applies the labels. That is the point -- CreateNamespace
+# makes a namespace but cannot label it, and the RHOAI dashboard lists a
+# namespace under Projects only when it carries
+# opendatahub.io/dashboard=true. Without the label the tenant is
+# invisible in the dashboard with everything in it running.
+#
+# Prune=false because this namespace is NOT ours to delete: the tenant
+# workload owns its lifecycle, and pruning it here would take the
+# tenant's own resources with it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.seat.namespace }}
+  labels:
+    opendatahub.io/dashboard: "true"
+    demo.redhat.com/application: "openclaw-on-openshift"
+{{- if .Values.seat.mlflowWorkspace }}
+    # RHOAI MLflow is workspace-scoped and selects on this DEDICATED
+    # label rather than opendatahub.io/dashboard, so that enabling
+    # MLflow for a namespace and listing it as a project stay
+    # independent decisions. API calls also need the header
+    # X-MLflow-Workspace: <namespace>.
+    mlflow.opendatahub.io/workspace: "true"
+{{- end }}
+  annotations:
+    # Before the Claw CR and the quota.
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false
+{{- end }}

@@ -1,0 +1,25 @@
+tenant:
+  namespace: ""
+  # Must match the Keycloak user the tenant item created. The mint logs
+  # in as them, and deliberately will NOT fall back to its own
+  # ServiceAccount if that fails -- see templates/mint-job.yaml.
+  username: ""
+  password: ""
+
+keys:
+  # Mint as the tenant rather than as this Job's ServiceAccount.
+  #
+  # The `user` dimension in authorized_hits_total records who MINTED a
+  # key, not who called it. Minting as the SA collapses every tenant
+  # into one row and makes per-tenant quota meaningless -- the exact
+  # bug this flag exists to avoid, which is why failure here is
+  # reported rather than silently worked around.
+  asTenant: true
+  # How long to wait for the MaaS chain, in minutes.
+  waitMinutes: 20
+
+maas:
+  gatewayHost: ""
+  model: "qwen3-235b-a22b"
+  keySecretName: "litellm-api-key"
+  keyExpirationDays: 30

@@ -1,0 +1,137 @@
+# ============================================================
+# Tenant chart — ONE OpenClaw seat, one namespace, one order.
+#
+# The top of this file deliberately mirrors the helm_values that
+# ocp4_workload_gitops_bootstrap passes from the tenant catalog item, so
+# the contract is readable from either side. Everything below that is
+# ours and has a working default.
+#
+# WHAT THIS CHART DOES NOT DO, because the cluster already has it:
+# RHOAI, ODF/MCG, the MaaS gateway and its models, the claw operator,
+# the MLflow collector, the MCP catalog and the broker. If a tenant
+# comes up with CredentialsResolved=False or no Claw CRD, the cluster
+# chart is missing or behind — not this one.
+# ============================================================
+
+# ------------------------------------------------------------
+# Injected by AgnosticV at order time — do not commit real values
+# ------------------------------------------------------------
+tenant:
+  # The order GUID. Used for the audience hostname and as the seat's
+  # identity in MaaS metrics.
+  name: ""
+  user:
+    # Created by ocp4_workload_tenant_keycloak_user, not by this chart.
+    name: ""
+    password: ""
+
+claws:
+  # Created by ocp4_workload_tenant_namespace, not by this chart.
+  namespace: ""
+  models:
+    # The MaaS endpoint the seat calls. Empty falls back to the
+    # in-cluster gateway, which is the one the demo is about.
+    url: ""
+    # A LiteMaaS virtual key issued at order time. Empty means the seat
+    # mints its own against the in-cluster gateway — see keys.mint.
+    apiToken: ""
+
+# ------------------------------------------------------------
+# Where ArgoCD reads this chart from
+# ------------------------------------------------------------
+gitops:
+  repoUrl: "https://github.com/rhpds/openclaw-on-openshift-gitops.git"
+  # RHDP sets repoURL; we default repoUrl. The helper coalesces them.
+  repoURL: ""
+  revision: "main"
+  # Repo ROOT, not "tenant": the component charts are shared with the
+  # cluster chart and live at the top level. Only the app-of-apps are
+  # under cluster/ and tenant/.
+  basePath: ""
+
+argocd:
+  namespace: openshift-gitops
+  project: default
+
+cluster:
+  # Apps domain, for the audience Route and the Control UI origin.
+  appsDomain: ""
+
+# ------------------------------------------------------------
+# The seat itself
+# ------------------------------------------------------------
+seat:
+  # Derived from claws.namespace when empty. Overriding is for running
+  # this chart by hand outside a tenant order.
+  namespace: ""
+  username: ""
+  # The per-tenant part of the audience hostname.
+  userCode: ""
+  # List the tenant under Projects in the RHOAI dashboard.
+  labelAsAiProject: true
+  # Let the tenant use the RHOAI MLflow prompt registry.
+  mlflowWorkspace: true
+  # The namespace and its quota come from ocp4_workload_tenant_namespace
+  # on an ordered cluster. Creating them again is harmless but means two
+  # owners for one object, so it is off by default here and on for a
+  # by-hand run.
+  createNamespace: false
+  createQuota: false
+
+audience:
+  # The Route attendees actually use, and the origin the Control UI must
+  # accept or the browser connection is refused.
+  enabled: true
+  # Empty derives a stable 5-char code from the tenant name.
+  code: ""
+
+keys:
+  # Mint a key against the in-cluster MaaS gateway when
+  # claws.models.apiToken is empty.
+  #
+  # WHY MINTING IS STILL THE DEFAULT even though AgnosticV can hand us a
+  # LiteMaaS key: an injected key talks to upstream LiteMaaS directly
+  # and bypasses the in-cluster gateway, so per-tenant quota and the
+  # MaaS usage metrics — most of what the demo shows — never see the
+  # traffic. Inject a key when you want the tenant to work without the
+  # gateway; mint when you want the demo.
+  mint: true
+  # Mint AS the tenant user, so authorized_hits_total attributes usage
+  # to them rather than collapsing every tenant into one row. Needs
+  # tenant.user.password.
+  asTenant: true
+  waitMinutes: 20
+
+maas:
+  # The in-cluster gateway. Empty derives it from cluster.appsDomain.
+  gatewayHost: ""
+  model: "qwen3-235b-a22b"
+  keySecretName: "litellm-api-key"
+  keyExpirationDays: 30
+  contextWindow: 262144
+  contextTokens: 200000
+  maxTokens: 16384
+
+images:
+  openclaw: "quay.io/bluesman/openclaw:2026.6.35-mlflow-preview7"
+  mcpPrefix: "quay.io/openclawopenshift"
+  pullSecret: ""
+  pullSecretName: "fantaco-registry"
+
+# Where this tenant posts its traces. The collector belongs to the
+# cluster chart; this is only the address and what to capture.
+tracing:
+  enabled: true
+  namespace: "openclaw-tracing"
+  collectorName: "openclaw-mlflow"
+  sampleRate: 1
+  captureContent: true
+  captureSystemPrompt: false
+
+components:
+  seat:
+    enabled: true
+  seatKeys:
+    enabled: true
+  seatRuntime:
+    enabled: true

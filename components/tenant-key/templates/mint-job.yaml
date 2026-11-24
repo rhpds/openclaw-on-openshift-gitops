@@ -1,0 +1,288 @@
+{{/*
+Mint ONE MaaS key, for this tenant, as this tenant.
+
+This is the step that makes the difference between a demo and a
+namespace full of healthy-looking pods: a Claw whose litellm-api-key
+secret does not exist sits at CredentialsResolved=False and the tenant
+cannot infer at all. It cannot be a templated Secret -- sk-oai-… keys
+do not exist until the MaaS chain is Ready, so there is no value to
+put in git -- but that rules out a Secret, not automation.
+
+THE THREE THINGS THAT MAKE THIS SAFE, each of which it would be easy
+to get wrong in a way that is worse than doing it by hand:
+
+1. CREATE-IF-ABSENT, NEVER OVERWRITE. With selfHeal on, a hook can run
+   every few minutes. A mint-on-every-sync loop would hand the tenant
+   a fresh key continuously and invalidate the one their gateway is
+   holding. An existing secret is left untouched.
+
+2. IT WAITS FOR THE CHAIN. A key minted before the MaaSModelRef is
+   Ready can be issued successfully and then fail on the first real
+   inference -- the worst failure mode in this stack, because
+   everything reads healthy right up until someone asks a question.
+
+3. IT REFUSES TO MINT AS THE WRONG IDENTITY. The `user` dimension in
+   authorized_hits_total records who MINTED a key, not who called it,
+   so minting as this Job's ServiceAccount attributes the tenant's
+   usage to the SA and makes per-tenant quota meaningless. If the
+   tenant login fails, this fails loudly instead -- falling back to
+   the SA would produce exactly the bug asTenant exists to prevent,
+   and nothing downstream would reveal it.
+
+JOB NAME CARRIES A CHECKSUM OF ITS INPUTS, and that is not cosmetic.
+Jobs are immutable: change a value and Helm renders a new spec, but
+the object on the cluster is not replaced, and Argo deletes it only
+when the hook next fires. A stale Complete Job is then reused. At
+30 seats in the N-seat chart this went wrong exactly that way -- the
+Application carried count 30 while the running Job still had
+SEAT_COUNT=1, wrote one identity and reported success.
+*/}}
+{{- $gw := printf "https://%s" .Values.maas.gatewayHost }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tenant-key
+  namespace: {{ .Values.tenant.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-key
+  namespace: {{ .Values.tenant.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+rules:
+  # get AND list. A get-only role makes the absence check fail in a way
+  # indistinguishable from "the secret is not there", so the hook would
+  # mint over a live key. That distinction cost an afternoon on w5xfc.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tenant-key
+  namespace: {{ .Values.tenant.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tenant-key
+subjects:
+  - kind: ServiceAccount
+    name: tenant-key
+    namespace: {{ .Values.tenant.namespace }}
+---
+{{/*
+Reading the MaaS chain's state is cluster-scoped; writing is not. Kept
+as a separate, read-only ClusterRole for that reason -- the namespaced
+Role above is the only thing that can create anything.
+
+Named per tenant: a cluster carries one of these per order, and a
+shared name would mean the last tenant's binding silently replaces
+every earlier one.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ printf "tenant-key-read-%s" .Values.tenant.namespace | trunc 63 | trimSuffix "-" }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+rules:
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maasmodelrefs"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ printf "tenant-key-read-%s" .Values.tenant.namespace | trunc 63 | trimSuffix "-" }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ printf "tenant-key-read-%s" .Values.tenant.namespace | trunc 63 | trimSuffix "-" }}
+subjects:
+  - kind: ServiceAccount
+    name: tenant-key
+    namespace: {{ .Values.tenant.namespace }}
+{{- if .Values.tenant.password }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tenant-key-login
+  namespace: {{ .Values.tenant.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+type: Opaque
+stringData:
+  password: {{ .Values.tenant.password | quote }}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tenant-key-{{ printf "%v|%v|%v" .Values.maas.model .Values.keys.asTenant .Values.maas.gatewayHost | sha256sum | trunc 8 }}
+  namespace: {{ .Values.tenant.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 2
+  # Keep the finished pod. Debugging a hook whose pod has been garbage
+  # collected is miserable, and this one handles credentials.
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: tenant-key
+      restartPolicy: Never
+      containers:
+        - name: mint
+          image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+          env:
+            - name: MAAS
+              value: {{ $gw | quote }}
+            - name: NS
+              value: {{ .Values.tenant.namespace | quote }}
+            - name: USER
+              value: {{ .Values.tenant.username | quote }}
+            - name: SECRET_NAME
+              value: {{ .Values.maas.keySecretName | quote }}
+            - name: EXP_DAYS
+              value: {{ .Values.maas.keyExpirationDays | quote }}
+            - name: AS_TENANT
+              value: {{ .Values.keys.asTenant | quote }}
+            - name: WAIT_MIN
+              value: {{ .Values.keys.waitMinutes | quote }}
+            - name: MODEL
+              value: {{ .Values.maas.model | quote }}
+{{- if .Values.tenant.password }}
+            - name: TENANT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tenant-key-login
+                  key: password
+{{- end }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -uo pipefail   # NOT -e: a denied command should report,
+                                 # not kill the script mid-diagnosis.
+
+              # ---- 0. already done? ------------------------------------
+              # First, because everything below is pointless if the
+              # tenant already holds a working key.
+              if oc get secret "$SECRET_NAME" -n "$NS" >/dev/null 2>&1; then
+                echo "$NS already has $SECRET_NAME — leaving it alone."
+                echo "Minting again would invalidate the key the gateway"
+                echo "is currently holding."
+                exit 0
+              fi
+
+              # ---- 1. wait for the chain -------------------------------
+              polls=$(( WAIT_MIN * 4 ))
+              ready=0
+              for i in $(seq 1 "$polls"); do
+                m=$(oc get maasmodelref "$MODEL" -n models-as-a-service \
+                      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+                if [ "$m" = "True" ]; then ready=1; break; fi
+                echo "waiting for MaaSModelRef/$MODEL to be Ready (now ${m:-unset}, $i/$polls)"
+                sleep 15
+              done
+              if [ "$ready" != "1" ]; then
+                echo "ERROR: MaaSModelRef $MODEL never reached Ready; refusing to mint." >&2
+                echo "A key minted now can issue fine and then fail on the" >&2
+                echo "tenant's first real question." >&2
+                exit 1
+              fi
+              echo "chain Ready; minting against $MAAS"
+
+              # ---- 2. decide whose token to mint with ------------------
+              TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              if [ "$AS_TENANT" = "true" ]; then
+                if [ -z "${TENANT_PASSWORD:-}" ]; then
+                  echo "ERROR: asTenant is set but no tenant password was supplied." >&2
+                  echo "Pass tenant.user.password, or set keys.asTenant=false to" >&2
+                  echo "accept ServiceAccount attribution deliberately." >&2
+                  exit 1
+                fi
+                KC=$(mktemp)
+                if KUBECONFIG="$KC" oc login --insecure-skip-tls-verify=true \
+                     "$(oc whoami --show-server)" -u "$USER" -p "$TENANT_PASSWORD" >/dev/null 2>&1; then
+                  TOKEN=$(KUBECONFIG="$KC" oc whoami -t 2>/dev/null)
+                  echo "minting as $USER"
+                else
+                  # Deliberately NOT falling back to the ServiceAccount.
+                  echo "ERROR: could not log in as $USER." >&2
+                  echo "Not minting as the ServiceAccount: that would attribute" >&2
+                  echo "this tenant's usage to the SA and silently break" >&2
+                  echo "per-tenant quota, which is the whole reason for asTenant." >&2
+                  rm -f "$KC"
+                  exit 1
+                fi
+                rm -f "$KC"
+              else
+                echo "minting as the ServiceAccount (asTenant=false)"
+              fi
+
+              # ---- 3. mint ---------------------------------------------
+              KEY=$(curl -sk -m 45 -X POST "${MAAS}/v1/api-keys" \
+                      -H "Authorization: Bearer ${TOKEN}" \
+                      -H 'Content-Type: application/json' \
+                      -d "$(printf '{"name":"%s","description":"OpenClaw tenant key","expiration":"%sd"}' "$NS" "$EXP_DAYS")" \
+                      2>/dev/null \
+                    | python3 -I -c "
+              import json,sys
+              raw=sys.stdin.read()
+              try: d=json.loads(raw)
+              except Exception:
+                  sys.stderr.write('unparseable response: '+raw[:200]+'\n'); sys.exit(1)
+              # the field name has moved between RHOAI builds
+              for f in ('api_key','apiKey','key','token','secret'):
+                  v=d.get(f)
+                  if isinstance(v,str) and v.startswith('sk-'):
+                      print(v); sys.exit(0)
+              sys.stderr.write('no sk- key in response: '+json.dumps(d)[:200]+'\n'); sys.exit(1)
+              ")
+              if [ -z "${KEY:-}" ]; then
+                echo "ERROR: mint failed against $MAAS" >&2
+                exit 1
+              fi
+
+              if ! printf '%s' "$KEY" | oc create secret generic "$SECRET_NAME" \
+                    -n "$NS" --from-file=api-key=/dev/stdin >/dev/null 2>&1; then
+                # Lost a race? Then the secret exists, which is the
+                # outcome we wanted.
+                if oc get secret "$SECRET_NAME" -n "$NS" >/dev/null 2>&1; then
+                  echo "secret created concurrently; fine."
+                  exit 0
+                fi
+                echo "ERROR: minted a key but could not write $SECRET_NAME in $NS." >&2
+                echo "The key is now orphaned in MaaS — revoke it before retrying." >&2
+                exit 1
+              fi
+              echo "minted and stored $SECRET_NAME for $NS"
+          resources:
+            requests: {cpu: 20m, memory: 96Mi}
+            limits: {cpu: "1", memory: 512Mi}

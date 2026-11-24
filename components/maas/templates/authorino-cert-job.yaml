@@ -1,0 +1,123 @@
+{{- if .Values.maas.connectivityLink.enabled }}
+{{/*
+The one genuinely imperative step in this chart.
+
+Authorino's listener TLS secret is minted by the service-ca operator when
+the Service authorino-authorino-authorization carries
+  service.beta.openshift.io/serving-cert-secret-name
+That Service is created by the Authorino operator, so there is nothing for
+Helm to own. Annotating it is a mutation of someone else's object, which
+is exactly the case a hook Job is for — not a workaround for something
+that could have been a resource.
+
+Runs as a PostSync hook, is idempotent, and waits for the Service to
+appear rather than assuming it already has.
+*/}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: authorino-cert-annotator
+  namespace: kuadrant-system
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: authorino-cert-annotator
+  namespace: kuadrant-system
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: authorino-cert-annotator
+  namespace: kuadrant-system
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: authorino-cert-annotator
+subjects:
+  - kind: ServiceAccount
+    name: authorino-cert-annotator
+    namespace: kuadrant-system
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: authorino-cert-annotator
+  namespace: kuadrant-system
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 4
+  template:
+    spec:
+      serviceAccountName: authorino-cert-annotator
+      restartPolicy: OnFailure
+      containers:
+        - name: annotate
+          image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              SVC=authorino-authorino-authorization
+              for i in $(seq 1 120); do
+                if oc get svc "$SVC" -n kuadrant-system >/dev/null 2>&1; then
+                  oc annotate svc "$SVC" -n kuadrant-system \
+                    service.beta.openshift.io/serving-cert-secret-name=authorino-server-cert \
+                    --overwrite
+                  echo "annotated $SVC"
+
+                  # AND RESTART AUTHORINO. Annotating only asks
+                  # service-ca to mint the Secret; the pod is already
+                  # running and never loads it. Until it restarts the
+                  # gateway AuthPolicy stays
+                  #   Enforced=False "waiting for the following
+                  #   components to sync: [Authorino]"
+                  # and MaaS key minting returns HTTP 500 with no hint
+                  # as to why. Verified on sv68v 2026-11-19: the restart
+                  # alone flipped it to Enforced=True and the smoke test
+                  # then passed.
+                  for j in $(seq 1 30); do
+                    if oc get secret authorino-server-cert -n kuadrant-system >/dev/null 2>&1; then break; fi
+                    echo "waiting for service-ca to mint the cert ($j/30)"
+                    sleep 10
+                  done
+                  oc rollout restart deployment/authorino -n kuadrant-system || true
+                  echo "restarted authorino so it loads the cert"
+                  exit 0
+                fi
+                echo "waiting for $SVC ($i/120)"
+                sleep 10
+              done
+              echo "ERROR: $SVC never appeared — is the Kuadrant CR Ready?" >&2
+              exit 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+{{- end }}

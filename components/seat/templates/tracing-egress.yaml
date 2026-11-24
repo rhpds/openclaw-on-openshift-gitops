@@ -1,0 +1,50 @@
+{{- if .Values.tracing.enabled }}
+{{/*
+Let this tenant's gateway reach the shared collector.
+
+THE SELECTOR MUST BE THE GATEWAY (app: claw), and the evidence here
+actively misleads. The gateway has HTTP_PROXY=instance-proxy:8080 and
+the proxy logs "blocked CONNECT to unknown domain …:4318", so
+everything points at the proxy mediating this. It does not -- the OTLP
+exporter bypasses the proxy entirely. The proof was always there: the
+standalone MLflow was never in the proxy allowlist and received traces
+for days.
+
+Probing from inside the gateway with Node `fetch` is worthless for
+confirming this: fetch honours HTTP_PROXY, the exporter does not. Use
+the collector's own counters on :8888 --
+otelcol_receiver_accepted_spans and otelcol_exporter_sent_spans.
+
+Editing instance-proxy-config is also pointless: the Claw operator
+reconciles it back and the CR exposes no allowlist field.
+
+The collector itself belongs to the cluster chart. If this policy is
+in place and traces still do not arrive, check that chart before
+touching this one.
+*/}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-collector
+  namespace: {{ .Values.seat.namespace }}
+  labels:
+    demo.redhat.com/application: "openclaw-on-openshift"
+spec:
+  podSelector:
+    matchLabels:
+      app: claw
+      claw.sandbox.redhat.com/instance: instance
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.tracing.collectorNamespace | default "openclaw-tracing" }}
+      ports:
+        - port: 4318
+          protocol: TCP
+        - port: 4317
+          protocol: TCP
+{{- end }}

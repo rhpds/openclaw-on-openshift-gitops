@@ -1,0 +1,9 @@
+apiVersion: v2
+name: tenant-key
+description: >-
+  Mints ONE MaaS API key, as the tenant, into their litellm-api-key
+  secret. Create-if-absent: an existing key is never overwritten,
+  because the gateway is holding it.
+type: application
+version: 0.1.0
+appVersion: "2026.6.35"

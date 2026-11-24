@@ -1,0 +1,115 @@
+seat:
+  index: "1"
+  namespace: "agentic-user1"
+  username: "agentic-user1"
+  # The per-seat part of the audience hostname.
+  userCode: "user1"
+  # List the seat under Projects in the RHOAI dashboard.
+  labelAsAiProject: true
+  # Let the seat use the RHOAI MLflow prompt registry.
+  mlflowWorkspace: true
+  # Both OFF in a tenant order: ocp4_workload_tenant_namespace already
+  # creates the namespace and its quota, and two owners for one object
+  # is how a quota ends up flapping between two values every sync.
+  createNamespace: false
+  createQuota: false
+
+cluster:
+  # Apps domain, for the audience Route and allowedOrigins.
+  appsDomain: ""
+
+deployer:
+  guid: ""
+
+audience:
+  # The Route attendees actually use, and the origin the Control UI
+  # must accept or the browser is refused.
+  enabled: true
+  # Empty derives a stable 5-char code from the GUID. Pin it to the
+  # code the broker already issued if update-broker-ocp.sh has run.
+  code: ""
+
+mcp:
+  # The three servers the demo uses. The operator also derives the
+  # proxy allowlist from this block, so dropping one silently breaks
+  # egress to it as well as removing the tools.
+  servers:
+    - name: customer
+      service: mcp-customer-service
+      port: 9001
+    - name: product
+      service: mcp-product-service
+      port: 9003
+    - name: sales-order
+      service: mcp-sales-order-service
+      port: 9004
+
+images:
+  openclaw: "quay.io/bluesman/openclaw:2026.6.35-mlflow-preview7"
+  # .dockerconfigjson for a private prefix. Empty = anonymous pulls.
+  pullSecret: ""
+  pullSecretName: "fantaco-registry"
+
+maas:
+  model: "qwen3-235b-a22b"
+  apiBase: ""
+  contextWindow: 262144
+  contextTokens: 200000
+  maxTokens: 16384
+  keySecretName: "litellm-api-key"
+  # The per-seat key VALUE. Normally empty: sk-oai-... keys cannot exist
+  # until the MaaS chain is Ready, so maas-mint-seat-keys.sh --apply
+  # writes them into this secret after the fact. The chart therefore does
+  # not manage the Secret's contents — see templates/claw.yaml.
+  key: ""
+
+quota:
+  requestsCpu: "3"
+  requestsMemory: "4Gi"
+  limitsCpu: "8"
+  limitsMemory: "10Gi"
+  pods: "16"
+
+observability:
+  # The standalone MLflow that receives OTLP traces from every seat.
+  mlflowNamespace: "mlflow"
+  mlflowPort: 5000
+  serviceMonitor: true
+  networkPolicies: true
+
+# Where the agents look for workspace skills.
+#
+# MUST MATCH where seat-runtime writes them -- its paths.home plus
+# /workspace, i.e. /home/node/.openclaw/workspace, which is this path
+# once the tilde is expanded. If the two disagree the skills are
+# injected successfully into a directory no agent reads, and the only
+# symptom is the model claiming the skill does not exist.
+skills:
+  workspace: "~/.openclaw/workspace"
+
+# Where this seat posts its traces.
+#
+# ALWAYS THE COLLECTOR, NEVER MLflow DIRECTLY. The gateway container
+# runs with automountServiceAccountToken off -- no SA token, no
+# service-ca.crt -- and RHOAI MLflow requires both. No OTLP setting
+# fixes that; the collector holds the credential instead.
+#
+# So headers stay EMPTY here. X-MLflow-Workspace and
+# x-mlflow-experiment-id are the collector's business, and the
+# experiment id is not knowable at template time anyway.
+tracing:
+  enabled: true
+  # Where the shared collector lives. It belongs to the CLUSTER chart;
+  # the tenant only needs egress to it.
+  collectorNamespace: "openclaw-tracing"
+  # A full signal path, not a base URL: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+  # is used verbatim, so dropping /v1/traces posts to / and 404s.
+  endpoint: "http://openclaw-mlflow-collector.openclaw-tracing.svc.cluster.local:4318/v1/traces"
+  headers: ""
+  sampleRate: 1
+  # Prompt and completion bodies. Without this MLflow shows the model
+  # call with empty inputs and outputs, which reads as a broken
+  # integration rather than as a capture setting.
+  captureContent: true
+  # Long, identical across seats, and attached to every span.
+  captureSystemPrompt: false

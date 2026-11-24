@@ -1,0 +1,54 @@
+tenant:
+  # The one namespace this chart operates on. Set by the tenant
+  # app-of-apps -- there is no loop and no seat count here, which
+  # is the main difference from the N-seat chart this came from.
+  namespace: ""
+
+heartbeat:
+  # Muzzle the per-seat heartbeat.
+  #
+  # The control is INVERTED and this is the single most surprising fact
+  # in the repo: a MISSING workspace/HEARTBEAT.md ARMS the heartbeat,
+  # which then fires every 30 minutes at ~40k tokens a poll, per seat.
+  # A file that is present and comments-only disables it.
+  #
+  # The CLI is not durable here -- `system heartbeat disable` writes
+  # runtime state into state/openclaw.sqlite, which every reset wipes,
+  # so the heartbeat silently returns. Writing the file is the durable
+  # control.
+  muzzle: true
+
+skills:
+  # Seed the enterprise skills into each seat.
+  #
+  # Copying into a running pod is unreliable at fleet scale: roughly
+  # 2.5% of seats silently miss the skill, and on 2026-11-10 the
+  # presenter's own seat was one of them, discovered live on stage when
+  # /quote was missing. So this VERIFIES after writing and retries,
+  # rather than trusting that the write happened.
+  inject: true
+  # Where the content comes from. It lives at the repo ROOT
+  # (workspace-templates/, claw_skills/), outside this chart, so Helm
+  # cannot read it -- the Job fetches the repo archive at the revision
+  # Argo is syncing. One canonical copy, no drift.
+  repoUrl: "https://github.com/rhpds/openclaw-on-openshift-gitops"
+  revision: "main"
+  # Only quote-builder is seeded today; claw_skills/ holds others that
+  # belong to different demos.
+  names:
+    - quote-builder
+  # Paths INSIDE the repo archive. They are not both at the root:
+  # claw_skills/ is, workspace-templates/ is under clawoperator-openclaw/.
+  # Assuming otherwise produced "workspace-templates missing from the
+  # archive" while the URL was perfectly correct.
+  templatesPath: "workspace-templates"
+  skillsPath: "claw_skills"
+
+# Where the gateway keeps its workspace inside the pod.
+paths:
+  home: "/home/node/.openclaw"
+  # How long to wait for a seat's gateway, in 15s polls. 40 = 10 min.
+  # Patience matters more than it looks: a PostSync hook only runs when
+  # a sync happens, so a seat skipped for "not ready yet" is not picked
+  # up later -- there is no next sync on a Synced application.
+  gatewayWaitPolls: 40

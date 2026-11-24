@@ -1,0 +1,41 @@
+{{/*
+The resource that makes the hook fire at all.
+
+A PostSync hook runs when a sync happens, and Argo does not count hook
+resources as managed resources. A chart that is ONLY hooks therefore
+has zero resources, is trivially Synced, never performs a sync
+operation, and its PostSync hook never runs. That is exactly what
+happened on w5xfc: the keys Application sat Synced/Healthy with
+`resources: 0` and `operationState: none`, so no key was ever minted
+and the Claw stayed at CredentialsResolved=False.
+
+So this ConfigMap exists to give the Application something real to
+sync. The checksum means a change to any input the hook cares about --
+the model, the gateway, the expiry, who it mints as -- produces a
+diff, a sync, and therefore a re-run.
+
+It is also the record of what the key was minted against, which is
+worth having when it stops working and nobody remembers which gateway
+or expiry it came from.
+*/}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-key-state
+  namespace: {{ .Values.tenant.namespace }}
+  labels:
+    demo.redhat.com/application: "openclaw-on-openshift"
+  annotations:
+    openclaw.dev/hook-config: {{ printf "%v|%v|%v|%v" .Values.maas.model .Values.maas.gatewayHost .Values.maas.keyExpirationDays .Values.keys.asTenant | sha256sum | trunc 16 }}
+data:
+  tenantNamespace: {{ .Values.tenant.namespace | quote }}
+  model: {{ .Values.maas.model | quote }}
+  gateway: {{ .Values.maas.gatewayHost | quote }}
+  keySecretName: {{ .Values.maas.keySecretName | quote }}
+  keyExpirationDays: {{ .Values.maas.keyExpirationDays | quote }}
+  mintedAsTenant: {{ .Values.keys.asTenant | quote }}
+  note: |
+    The key itself is never recorded here. This is the configuration it
+    was minted against; the key lives in the litellm-api-key secret and
+    is create-if-absent, never rewritten.
