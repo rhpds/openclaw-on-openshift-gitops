@@ -97,7 +97,7 @@ spec:
           # which is what set-audience-origins.sh exists to repair when
           # it was patched the other way.
           allowedOrigins:
-            - {{ printf "https://instance-%s.%s" .Values.seat.namespace .Values.cluster.appsDomain | quote }}
+            - {{ printf "https://instance-%s.%s" .Values.seat.namespace (include "seat.appsDomain" .) | quote }}
 {{- if .Values.audience.enabled }}
             - {{ printf "https://%s" (include "seat.audienceHost" .) | quote }}
 {{- end }}

@@ -51,7 +51,11 @@ gitops:
 
 argocd:
   namespace: openshift-gitops
-  project: default
+  # Matches ocp4_workload_gitops_bootstrap_application_project in the
+  # tenant catalog item, and the AppProject the cluster chart creates.
+  # `default` would work but puts tenants outside the guard rails the
+  # project exists to provide.
+  project: tenants
 
 cluster:
   # Apps domain, for the audience Route and the Control UI origin.

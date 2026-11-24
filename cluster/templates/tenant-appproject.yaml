@@ -1,0 +1,75 @@
+{{- if .Values.tenants.createAppProject }}
+{{/*
+The AppProject every tenant's Applications live in.
+
+WHY THE CLUSTER CHART OWNS THIS. AppProjects are cluster-scoped, so a
+tenant CI (config: namespace) cannot create one and should not try.
+The tenant catalog item sets
+`ocp4_workload_gitops_bootstrap_application_project: tenants`, so this
+must exist BEFORE the first tenant is ordered.
+
+HOW IT FAILS IF IT DOES NOT EXIST, which is the reason for the comment:
+ArgoCD accepts the Application manifest -- the API server validates the
+manifest, not the referenced project -- and then parks it with
+`ComparisonError: AppProject "tenants" not found`. In dev the tenant
+item sets `ocp4_workload_gitops_bootstrap_health_ignore: true`, so the
+workload applies the Application, does not wait, and REPORTS SUCCESS.
+The order goes green and the tenant gets nothing. In prod it instead
+times out waiting for health, with an error that does not name the
+missing project.
+
+Wave -29: after cluster-prereqs raises the controller memory, before
+anything else. Nothing here depends on it, but a tenant ordered while
+the platform is still coming up should find the project already there.
+*/}}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: {{ .Values.tenants.appProject }}
+  namespace: {{ .Values.argocd.namespace }}
+  labels:
+    {{- include "openclaw.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-29"
+    # Tenants outlive any single sync of this chart, and pruning this
+    # would orphan every tenant Application at once.
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  description: >-
+    OpenClaw tenants. One namespace per order, three Applications each.
+  sourceRepos:
+{{- range .Values.tenants.sourceRepos }}
+    - {{ . | quote }}
+{{- end }}
+  destinations:
+    # The tenant's own namespace. Wildcarded because the names are not
+    # knowable here -- they are `user-<guid>-claws`, and the guid only
+    # exists once an order is placed.
+    - namespace: {{ .Values.tenants.namespacePattern | quote }}
+      server: https://kubernetes.default.svc
+    # The tenant app-of-apps creates Applications, which are objects in
+    # the ArgoCD namespace. Without this the bootstrap Application
+    # cannot create its three children.
+    - namespace: {{ .Values.argocd.namespace }}
+      server: https://kubernetes.default.svc
+  # NOT EMPTY, and this is the part that is easy to get wrong. An
+  # AppProject with no clusterResourceWhitelist permits NO cluster-scoped
+  # resources at all, and the tenant chart creates four: a ClusterRole
+  # and ClusterRoleBinding for the seat user, and a pair for each of its
+  # two hook Jobs. Omit this and every tenant fails with
+  # "resource ClusterRole is not permitted in project tenants".
+  clusterResourceWhitelist:
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    # The seat chart adopts its own namespace to label it -- the RHOAI
+    # dashboard will not list a project without
+    # opendatahub.io/dashboard=true.
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+{{- end }}

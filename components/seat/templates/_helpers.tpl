@@ -24,5 +24,24 @@ the broker's own stats.audience_id rather than assuming this one.
 {{- end -}}
 
 {{- define "seat.audienceHost" -}}
-{{- printf "claw-%s-%s.%s" (include "seat.audienceCode" .) .Values.seat.userCode .Values.cluster.appsDomain -}}
+{{- printf "claw-%s-%s.%s" (include "seat.audienceCode" .) .Values.seat.userCode (include "seat.appsDomain" .) -}}
+{{- end -}}
+
+{{/*
+The cluster apps domain, REQUIRED rather than defaulted.
+
+Empty here does not fail -- it renders `…claw-abc-user1.` and
+`https://instance-ns.`, which are syntactically fine and completely
+wrong. The Route is created, the Control UI origin does not match it,
+and the attendee gets "Browser origin not allowed" from a seat that
+every dashboard reports as healthy.
+
+On a tenant order this arrives as route_subdomain from the catalog
+item. That variable is discovered by the deployer rather than passed
+by the Sandbox API, so if it is ever not in scope for a
+`config: namespace` CI this is where it must surface -- as a loud
+template error at sync time, not as a broken seat.
+*/}}
+{{- define "seat.appsDomain" -}}
+{{- required "cluster.appsDomain is empty — the audience Route and the Control UI origin would both be wrong. On a tenant order this comes from route_subdomain." .Values.cluster.appsDomain -}}
 {{- end -}}

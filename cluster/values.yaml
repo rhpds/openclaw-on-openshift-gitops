@@ -71,6 +71,21 @@ bases:
 
 # num_users from the order form. Used as the seat count unless
 # seats.count is set explicitly.
+# The AppProject tenants are deployed into.
+#
+# MUST exist before the first tenant is ordered: the tenant catalog item
+# sets ocp4_workload_gitops_bootstrap_application_project, and a missing
+# project parks every tenant Application at ComparisonError -- silently
+# in dev, where the tenant item sets gitops_bootstrap_health_ignore.
+tenants:
+  createAppProject: true
+  appProject: "tenants"
+  # Tenant namespaces are `user-<guid>-claws`; the guid does not exist
+  # until an order is placed, so this has to be a pattern.
+  namespacePattern: "user-*"
+  sourceRepos:
+    - "https://github.com/rhpds/openclaw-on-openshift-gitops.git"
+
 argocd:
   namespace: openshift-gitops
   # Standalone default. The RHDP field-content workload overrides this to
