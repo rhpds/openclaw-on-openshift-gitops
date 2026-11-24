@@ -1,0 +1,27 @@
+{{/*
+Something real for Argo to sync, so the hook fires.
+
+Argo does not count hook resources as managed resources: a chart made
+only of hooks has `resources: 0`, is trivially Synced, never performs
+a sync operation, and its PostSync hook never runs. It sits green
+having done nothing.
+*/}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: broker-refresh-state
+  namespace: {{ .Values.tenant.namespace }}
+  labels:
+    demo.redhat.com/application: "openclaw-on-openshift"
+data:
+  tenantNamespace: {{ .Values.tenant.namespace | quote }}
+  brokerNamespace: {{ .Values.broker.namespace | quote }}
+  audienceRouteName: {{ .Values.broker.audienceRouteName | quote }}
+  note: |
+    The broker reads /var/lib/route-lb/routes.csv from inside its own
+    pod, and that file is copied in rather than mounted -- so it does
+    NOT survive a broker restart. The authoritative copy is the
+    broker-routes ConfigMap in the broker's namespace, written by this
+    hook. After a broker rollout, re-inject it rather than re-syncing
+    every tenant.

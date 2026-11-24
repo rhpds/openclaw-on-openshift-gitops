@@ -1,0 +1,10 @@
+apiVersion: v2
+name: broker-refresh
+description: >-
+  Registers this tenant's audience Route with the cluster's session
+  broker, at the end of the tenant's own creation. Reload, not reset:
+  tenants arrive one at a time and a reset would unassign every
+  attendee already connected.
+type: application
+version: 0.1.0
+appVersion: "2026.6.35"

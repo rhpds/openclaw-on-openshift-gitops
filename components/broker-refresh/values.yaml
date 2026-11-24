@@ -1,0 +1,9 @@
+tenant:
+  namespace: ""
+
+broker:
+  namespace: "session-broker"
+  deployment: "session-broker"
+  # The per-tenant Route the broker hands attendees to. Every tenant
+  # names it the same thing; the namespace is what differs.
+  audienceRouteName: "audience"

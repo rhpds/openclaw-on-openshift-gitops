@@ -215,3 +215,193 @@ spec:
         duration: 20s
         maxDuration: 2m
 {{- end }}
+
+{{- if .Values.components.fantacoApp.enabled }}
+---
+{{/*
+The FantaCo REST backends this tenant's agent queries.
+
+Three of the chart's seven services. finance, hrRecruiting,
+hrPolicySearch and salesPolicySearch belong to a different demo on the
+same chart -- leaving them on costs four more pods and four more
+Postgres instances per tenant for nothing.
+*/}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ printf "claws-%s-app" $name | trunc 53 | trimSuffix "-" }}
+  namespace: {{ .Values.argocd.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    # Same wave as the seat. The Claw tolerates its MCP servers being
+    # absent for a while -- it reports McpServersConfigured and retries
+    # -- so there is nothing to gain from serialising these.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ include "tenant.repoURL" . }}
+    targetRevision: {{ include "tenant.revision" . }}
+    path: {{ .Values.charts.fantacoPath }}/fantaco-app
+    helm:
+      valuesObject:
+        finance: {enabled: false}
+        hrRecruiting: {enabled: false}
+        hrPolicySearch: {enabled: false}
+        salesPolicySearch: {enabled: false}
+        customer:
+          enabled: true
+          image:
+            repository: {{ printf "%s/fantaco-customer-main" .Values.images.fantacoPrefix | quote }}
+            tag: {{ .Values.images.fantacoTag | quote }}
+        product:
+          enabled: true
+          image:
+            repository: {{ printf "%s/fantaco-product-main" .Values.images.fantacoPrefix | quote }}
+            tag: {{ .Values.images.fantacoTag | quote }}
+        salesorder:
+          enabled: true
+          image:
+            repository: {{ printf "%s/fantaco-sales-order-main" .Values.images.fantacoPrefix | quote }}
+            tag: {{ .Values.images.fantacoTag | quote }}
+        postgresql:
+          customer: {enabled: true}
+          product: {enabled: true}
+          salesorder: {enabled: true}
+          finance: {enabled: false}
+          hrRecruiting: {enabled: false}
+          hrPolicySearch: {enabled: false}
+          salesPolicySearch: {enabled: false}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $ns }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 3
+      backoff:
+        duration: 20s
+        maxDuration: 2m
+{{- end }}
+
+{{- if .Values.components.fantacoMcp.enabled }}
+---
+{{/*
+The MCP servers in front of those backends.
+
+THIS IS THE DEMO. The Claw's spec.mcpServers names
+mcp-customer-service, mcp-product-service and
+mcp-sales-order-service; without this Application those Services do
+not exist, the agent has no tools, and preflight reports it three
+separate ways -- McpServersConfigured unset, "MCP customer: not
+configured", and a missing proxy allowlist entry, because the operator
+derives the allowlist from the same block.
+*/}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ printf "claws-%s-mcp" $name | trunc 53 | trimSuffix "-" }}
+  namespace: {{ .Values.argocd.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ include "tenant.repoURL" . }}
+    targetRevision: {{ include "tenant.revision" . }}
+    path: {{ .Values.charts.fantacoPath }}/fantaco-mcp
+    helm:
+      valuesObject:
+        finance: {enabled: false}
+        hrRecruiting: {enabled: false}
+        hrPolicy: {enabled: false}
+        salesPolicySearch: {enabled: false}
+        customer:
+          enabled: true
+          image:
+            repository: {{ printf "%s/mcp-server-customer" .Values.images.mcpPrefix | quote }}
+            tag: {{ .Values.images.mcpTag | quote }}
+        product:
+          enabled: true
+          image:
+            repository: {{ printf "%s/mcp-server-product" .Values.images.mcpPrefix | quote }}
+            tag: {{ .Values.images.mcpTag | quote }}
+        salesorder:
+          enabled: true
+          image:
+            repository: {{ printf "%s/mcp-server-sales-order" .Values.images.mcpPrefix | quote }}
+            tag: {{ .Values.images.mcpTag | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $ns }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 3
+      backoff:
+        duration: 20s
+        maxDuration: 2m
+{{- end }}
+
+{{- if .Values.components.brokerRefresh.enabled }}
+---
+{{/*
+Announce this tenant to the cluster's session broker.
+
+LAST, and in its own Application rather than folded into the seat.
+The broker is the one piece of this tenant's deployment that touches
+shared cluster state, so when it fails it should be visibly its own
+failure -- a tenant whose broker registration did not happen is still
+a working tenant, it is just not yet reachable through the dashboard.
+Folding it into the seat Application would make that look like a
+broken seat.
+*/}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ printf "claws-%s-broker" $name | trunc 53 | trimSuffix "-" }}
+  namespace: {{ .Values.argocd.namespace }}
+  labels:
+    {{- include "tenant.labels" . | nindent 4 }}
+  annotations:
+    # After everything: the audience Route must exist to be registered.
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: {{ .Values.argocd.project }}
+  source:
+    repoURL: {{ include "tenant.repoURL" . }}
+    targetRevision: {{ include "tenant.revision" . }}
+    path: {{ include "tenant.componentPath" . }}components/broker-refresh
+    helm:
+      valuesObject:
+        tenant:
+          namespace: {{ $ns | quote }}
+        broker:
+          namespace: {{ .Values.broker.namespace | quote }}
+          deployment: {{ .Values.broker.deployment | quote }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ $ns }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 3
+      backoff:
+        duration: 20s
+        maxDuration: 2m
+{{- end }}

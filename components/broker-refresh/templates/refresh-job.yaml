@@ -1,0 +1,200 @@
+{{/*
+Tell the session broker that this tenant exists.
+
+WHY THE TENANT DOES THIS AND NOT THE CLUSTER. The broker is a cluster
+resource -- one dashboard, one pool of audience routes -- but its
+CONTENT changes every time a tenant is ordered. The cluster chart
+cannot know when that happens; the tenant can, because it is the thing
+happening. So the broker is deployed once by the cluster chart and
+refreshed by each tenant at the end of its own creation.
+
+RELOAD, NEVER RESET, and this is the one that would actually hurt.
+/admin/reset wipes every assignment in the pool. In the N-seat model
+that was harmless -- all seats were created at once, before anyone
+connected. Here tenants arrive one at a time, so a reset on the tenth
+order would unassign the nine attendees already working, mid-session,
+with no error anywhere. /admin/reload adds the new routes and leaves
+existing assignments alone.
+
+HOW THE BROKER ACTUALLY LEARNS THE ROUTES. It reads a CSV at
+/var/lib/route-lb/routes.csv inside its own pod. That file is not
+mounted from anywhere -- it is copied in. Which means IT DOES NOT
+SURVIVE A BROKER RESTART: a rolled broker pod comes back with whatever
+was baked into the image, and every tenant registered since then is
+gone from the dashboard until something re-injects. The ConfigMap
+written below is the durable record, so a restart can be repaired
+without re-running every tenant's hook, and so a future broker version
+can mount it instead.
+*/}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: broker-refresh
+  namespace: {{ .Values.tenant.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+---
+{{/*
+Cluster-scoped, and named per tenant for the usual reason: one
+Application per tenant means a shared name has the newest tenant
+replace the previous one's subject and silently revoke it.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ printf "broker-refresh-%s" .Values.tenant.namespace | trunc 63 | trimSuffix "-" }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+rules:
+  # Discover every tenant's audience Route, not just this one's: the
+  # CSV is the whole pool, and a partial one would drop the tenants
+  # that came before.
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # cp and the reload call are both exec.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ printf "broker-refresh-%s" .Values.tenant.namespace | trunc 63 | trimSuffix "-" }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ printf "broker-refresh-%s" .Values.tenant.namespace | trunc 63 | trimSuffix "-" }}
+subjects:
+  - kind: ServiceAccount
+    name: broker-refresh
+    namespace: {{ .Values.tenant.namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # No input checksum in this name, deliberately, unlike the other
+  # hooks: this one is supposed to re-run on every sync of the tenant.
+  # The route it registers can change, and re-registering is cheap and
+  # idempotent. generateName would be better still but Argo needs a
+  # stable name to track the hook.
+  name: broker-refresh-{{ .Values.tenant.namespace | sha256sum | trunc 8 }}
+  namespace: {{ .Values.tenant.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    # LAST. The audience Route has to exist before it can be
+    # registered, and the gateway should be up before an attendee can
+    # be sent to it.
+    argocd.argoproj.io/sync-wave: "10"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: broker-refresh
+      restartPolicy: Never
+      containers:
+        - name: refresh
+          image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+          env:
+            - name: BROKER_NS
+              value: {{ .Values.broker.namespace | quote }}
+            - name: BROKER_DEPLOY
+              value: {{ .Values.broker.deployment | quote }}
+            - name: ROUTE_NAME
+              value: {{ .Values.broker.audienceRouteName | quote }}
+            - name: MY_NS
+              value: {{ .Values.tenant.namespace | quote }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -uo pipefail   # not -e: this reports rather than aborts
+
+              if ! oc get deployment "$BROKER_DEPLOY" -n "$BROKER_NS" >/dev/null 2>&1; then
+                echo "No broker in $BROKER_NS — nothing to refresh."
+                echo "This tenant is fully functional without it; the broker"
+                echo "only hands attendees out across tenants. If you expected"
+                echo "one, the cluster chart has not deployed it yet."
+                exit 0
+              fi
+
+              POD=$(oc get pods -n "$BROKER_NS" -l app="$BROKER_DEPLOY" \
+                     --no-headers 2>/dev/null | awk '$3=="Running"{print $1; exit}')
+              if [ -z "${POD:-}" ]; then
+                echo "WARNING: broker has no Running pod; skipping refresh." >&2
+                echo "Re-run by syncing this tenant once the broker is up." >&2
+                exit 0
+              fi
+
+              # ---- build the WHOLE pool, not just this tenant ----------
+              CSV=$(mktemp)
+              n=0
+              while read -r ns host; do
+                [ -z "${host:-}" ] && continue
+                printf '%s,https://%s\n' "$ns" "$host" >> "$CSV"
+                n=$((n+1))
+              done < <(oc get route "$ROUTE_NAME" -A \
+                        -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.spec.host}{"\n"}{end}' \
+                        2>/dev/null || true)
+
+              if [ "$n" -eq 0 ]; then
+                echo "ERROR: found no '$ROUTE_NAME' routes in any namespace," >&2
+                echo "not even this tenant's. Registering an empty pool would" >&2
+                echo "take every existing tenant off the dashboard, so stopping." >&2
+                exit 1
+              fi
+              if ! grep -q "^${MY_NS}," "$CSV"; then
+                echo "ERROR: this tenant ($MY_NS) has no '$ROUTE_NAME' route." >&2
+                echo "Refusing to refresh: the hook ran before the Route existed." >&2
+                exit 1
+              fi
+              echo "registering $n route(s); this tenant is one of them"
+
+              # ---- durable record, for after a broker restart ----------
+              # The broker reads a file inside its own pod, which a
+              # rollout discards. This ConfigMap is what makes that
+              # recoverable without re-syncing every tenant.
+              oc create configmap broker-routes -n "$BROKER_NS" \
+                --from-file=routes.csv="$CSV" \
+                --dry-run=client -o yaml | oc apply -f - >/dev/null 2>&1 \
+                || echo "WARNING: could not record routes.csv in a ConfigMap" >&2
+
+              if ! oc cp "$CSV" "${BROKER_NS}/${POD}:/var/lib/route-lb/routes.csv" 2>/dev/null; then
+                echo "ERROR: could not copy routes.csv into $POD" >&2
+                exit 1
+              fi
+
+              # ---- reload, NOT reset -----------------------------------
+              # reset would unassign every attendee already working.
+              OUT=$(oc exec "$POD" -n "$BROKER_NS" -- node -e \
+                'fetch("http://localhost:3000/admin/reload",{method:"POST"}).then(r=>r.text()).then(console.log)' \
+                2>/dev/null || true)
+              if [ -z "${OUT:-}" ]; then
+                echo "WARNING: reload returned nothing. routes.csv is in place," >&2
+                echo "so the broker will pick it up on its next restart." >&2
+                exit 0
+              fi
+              echo "broker reloaded: $OUT"
+          resources:
+            requests: {cpu: 20m, memory: 96Mi}
+            limits: {cpu: "1", memory: 512Mi}
